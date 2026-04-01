@@ -72,7 +72,7 @@ def build_training_data(good_cycles_list):
 
 if __name__ == "__main__":
 
-    RAW_DATA_FOLDER = '../data/raw/M01_OP07/good'
+    RAW_DATA_FOLDER = '../data/raw/M01/OP07/good'
     PROCESSED_DATA_FOLDER = '../data/processed'
 
     os.makedirs(PROCESSED_DATA_FOLDER, exist_ok=True)
