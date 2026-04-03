@@ -23,10 +23,6 @@ def build_training_data(good_cycles_list):
     global_median = scaler.center_
     global_iqr = scaler.scale_
 
-    print("\n--- Edge Device Global Params ---")
-    print(f"X, Y, Z global median: {global_median}")
-    print(f"X, Y, Z global IQR: {global_iqr}")
-
     normalized_2d_matrix = scaler.transform(huge_2d_matrix)
     final_3d_tensor = normalized_2d_matrix.reshape(-1, 500, 3)
 
@@ -56,6 +52,11 @@ if __name__ == "__main__":
             "global_median": global_median.tolist(), 
             "global_iqr": global_iqr.tolist()
         }
+
+        print("\n--- Edge Device Global Params ---")
+        print(f"X, Y, Z global median: {global_median}")
+        print(f"X, Y, Z global IQR: {global_iqr}")
+
         params_save_path = os.path.join(PROCESSED_DATA_FOLDER, 'edge_params.json')
 
         with open(params_save_path, 'w') as f:

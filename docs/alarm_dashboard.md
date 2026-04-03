@@ -39,3 +39,7 @@ To demonstrate the system's robustness and Continuous Learning capabilities, the
 - Model Version Switcher (A/B Testing Concept Drift):
   - A dropdown/toggle to switch the underlying inference model between Base Model (v1.0) and Fine-tuned Model (v1.1).
   - Purpose: When testing 2021 data (aged machine), selecting Base Model should show rising MAE (drifting baseline), while switching to Fine-tuned Model will visually drop the MAE back to normal levels, showcasing successful Continuous Learning adaptation.
+
+5. Data Type/variables
+- A series of MAE or Reconstruction Error
+- Threshold: $\mu$, $\sigma$ and $\mu + 3*\sigma$

@@ -5,9 +5,10 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 from cnnlstm_autoencoder import CNNLSTMAutoencoder
+from utility import load_cycle, slice_good_cycle, slice_bad_cycle
 
 
-def model_validation(dataset_path):
+def model_validation(dataset_path, model_path='data/models/cnnlstm_autoencoder_op07.pth', validation_plots_folder='data/plots/validation', alarm_params_path='data/processed/cloud_alarm_params.json'):
     """Validate the model against a saved validation dataset.
 
     Args:
@@ -18,11 +19,10 @@ def model_validation(dataset_path):
 
     model = CNNLSTMAutoencoder(seq_len=500, n_features=3, lstm_hidden_dim=64).to(device)
     model.load_state_dict(
-        torch.load('data/models/cnnlstm_autoencoder_op07.pth', map_location=device, weights_only=True)
+        torch.load(model_path, map_location=device, weights_only=True)
     )
     model.eval()
 
-    validation_plots_folder = 'data/plots/validation'
     os.makedirs(validation_plots_folder, exist_ok=True)
 
     all_good_steady_errors = []
@@ -98,7 +98,6 @@ def model_validation(dataset_path):
             "threshold_4sigma": float(threshold_4sigma),
         }
 
-        alarm_params_path = os.path.join('data/processed', 'cloud_alarm_params.json')
         with open(alarm_params_path, 'w') as f:
             json.dump(alarm_params, f, indent=4)
 
@@ -138,7 +137,30 @@ def model_validation(dataset_path):
 
     return summary
 
+def fast_validation(cycle_path, model_path='data/models/cnnlstm_autoencoder_op07.pth', global_median=None, global_iqr=None):
+    cycle_windows = slice_good_cycle(load_cycle(cycle_path))
+    if not cycle_windows:
+        print(f"Warning: No valid windows extracted from {cycle_path}. Skipping.")
+        return None
+    cycle_2d = np.vstack(cycle_windows)
+    cycle_normalized = (cycle_2d - global_median) / global_iqr
+    cycle_3d = cycle_normalized.reshape(-1, 500, 3)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = CNNLSTMAutoencoder(seq_len=500, n_features=3, lstm_hidden_dim=64).to(device)
+    model.load_state_dict(
+        torch.load(model_path, map_location=device, weights_only=True)
+    )
+
+    model.eval()
+    cycle_tensor = torch.tensor(cycle_3d, dtype=torch.float32).to(device)
+    with torch.no_grad():
+        reconstructed_tensor = model(cycle_tensor)
+    error_array = torch.mean(
+        torch.abs(cycle_tensor - reconstructed_tensor), dim=(1, 2)
+    ).cpu().numpy()
+    return error_array
 
 if __name__ == '__main__':
-    model_validation('data/processed/validation_cycles.npz')
+    model_validation(dataset_path='data/processed/validation_cycles.npz')
 
