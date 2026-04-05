@@ -2,6 +2,7 @@ import numpy as np
 import json
 from validation import model_validation
 from validation import fast_validation
+import matplotlib.pyplot as plt
 
 """ summary = model_validation(dataset_path='data/processed/testing_cycles.npz',
                            model_path='data/models/cnnlstm_autoencoder_op07_v1_1.pth',
@@ -30,3 +31,15 @@ n4sigma_alarms = np.sum(error_array > threshold_4sigma)
 n4sigma_ratio = n4sigma_alarms / len(error_array)
 print(f"3Sigma Alarm Ratio: {n3sigma_ratio:.4f} ({n3sigma_alarms} out of {len(error_array)} windows)")
 print(f"4Sigma Alarm Ratio: {n4sigma_ratio:.4f} ({n4sigma_alarms} out of {len(error_array)} windows)")
+
+plt.figure(figsize=(10, 5))
+plt.plot(error_array, color='blue', label='Reconstruction Error')
+
+plt.axhline(y=threshold_3sigma, color='orange', linestyle='--', linewidth=2, label='3 Sigma Threshold')
+plt.axhline(y=threshold_4sigma, color='red', linestyle='--', linewidth=2, label='4 Sigma Threshold')
+
+plt.title('Bad Cycle')
+plt.xlabel('Window')
+plt.ylabel('Reconstruction Error')
+plt.legend()
+plt.show()
