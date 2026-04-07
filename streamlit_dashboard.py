@@ -1,398 +1,218 @@
 import os
 import time
-import json
-import requests
-import numpy as np
+import sqlite3
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(
     page_title="Edge-Cloud CNC Anomaly Dashboard",
-    page_icon="Group 2",
+    page_icon="⚙️",
     layout="wide"
 )
 
 st.markdown("""
 <style>
-.main-title {
-    font-size: 2rem;
-    font-weight: 700;
-    margin-bottom: 0.2rem;
-}
-.sub-text {
-    color: #b0b0b0;
-    margin-bottom: 1rem;
-}
+.main-title { font-size: 2rem; font-weight: 700; margin-bottom: 0.2rem; }
+.sub-text { color: #b0b0b0; margin-bottom: 1rem; }
 .status-card {
-    padding: 16px;
-    border-radius: 12px;
-    text-align: center;
-    font-size: 22px;
-    font-weight: 700;
-    color: white;
-    margin-top: 10px;
-    margin-bottom: 10px;
+    padding: 16px; border-radius: 12px; text-align: center; font-size: 22px;
+    font-weight: 700; color: white; margin-top: 10px; margin-bottom: 10px;
     box-shadow: 0 4px 14px rgba(0,0,0,0.25);
 }
-.healthy {
-    background: linear-gradient(90deg, #1faa59, #2ecc71);
-}
-.warning {
-    background: linear-gradient(90deg, #d4ac0d, #f1c40f);
-    color: black;
-}
-.alarm {
-    background: linear-gradient(90deg, #c0392b, #e74c3c);
-    animation: blink 1s infinite;
-}
-.masked {
-    background: linear-gradient(90deg, #5d6d7e, #95a5a6);
-}
-.metric-box {
-    padding: 12px;
-    border-radius: 10px;
-    background-color: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
-}
-.block-title {
-    font-size: 1.05rem;
-    font-weight: 600;
-    margin-bottom: 0.4rem;
-}
-@keyframes blink {
-    50% { opacity: 0.45; }
-}
+.healthy { background: linear-gradient(90deg, #1faa59, #2ecc71); }
+.warning { background: linear-gradient(90deg, #d4ac0d, #f1c40f); color: black; }
+.alarm { background: linear-gradient(90deg, #c0392b, #e74c3c); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.45; } }
 </style>
 """, unsafe_allow_html=True)
 
+# PATHS of database and data
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-TEST_DATA_PATH = os.path.join(ROOT_DIR, "data", "processed", "testing_cycles.npz")
+DB_PATH = os.path.join(ROOT_DIR, "data", "processed", "inference_history.db")
 
-ALARM_PROFILE_PATHS = {
-    "Base Profile v1.0": os.path.join(ROOT_DIR, "data", "processed", "cloud_alarm_params.json"),
-    "Updated Profile v1.1": os.path.join(ROOT_DIR, "data", "processed", "cloud_alarm_params_new.json"),
-    "Tuned Profile v1.2": os.path.join(ROOT_DIR, "data", "processed", "cloud_alarm_params_tuned.json"),
-}
+def get_sigma_bounds(source_file):
+    """
+    Load 3-sigma & 4-sigma from selected_file for slider boundries.
+    If not found, return default values.
+    """
+    default_low, default_high = 0.3, 0.6
+    if not os.path.exists(DB_PATH):
+        return default_low, default_high
+    
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        if source_file == "All":
+            query = "SELECT threshold_3sigma, threshold_4sigma FROM history LIMIT 1"
+            res = pd.read_sql_query(query, conn)
+        else:
+            query = "SELECT threshold_3sigma, threshold_4sigma FROM history WHERE source_file = ? LIMIT 1"
+            res = pd.read_sql_query(query, conn, params=[source_file])
+        
+        if not res.empty:
+            return float(res.iloc[0]['threshold_3sigma']), float(res.iloc[0]['threshold_4sigma'])
+    except Exception as e:
+        print(f"Error fetching sigma bounds: {e}")
+    finally:
+        conn.close()
+    return default_low, default_high
 
+@st.cache_data(ttl=5) # cache for 5 seconds
+def fetch_full_history(source_file):
+    if not os.path.exists(DB_PATH):
+        return pd.DataFrame()
+    
+    conn = sqlite3.connect(DB_PATH)
+    query = "SELECT * FROM history"
+    params = []
+    
+    if source_file and source_file != "All":
+        query += " WHERE source_file = ?"
+        params.append(source_file)
+        
+    # Retrieve data ordered by timestamp to ensure correct playback sequence
+    query += " ORDER BY timestamp ASC"
+    
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
 
-@st.cache_data
-def load_cycles():
-    archive = np.load(TEST_DATA_PATH)
-    return {name: archive[name] for name in archive.files}
+def fetch_available_sources():
+    if not os.path.exists(DB_PATH):
+        return ["All"]
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        sources = pd.read_sql_query("SELECT DISTINCT source_file FROM history", conn)["source_file"].tolist()
+        return ["All"] + sources
+    except Exception:
+        return ["All"]
+    finally:
+        conn.close()
 
+# --- 1. Session State ---
+# Initialize playback index, current source, and play/pause state in session state
+if "playback_index" not in st.session_state:
+    st.session_state.playback_index = 0
+if "current_source" not in st.session_state:
+    st.session_state.current_source = None
+if "is_playing" not in st.session_state:
+    st.session_state.is_playing = False
 
-@st.cache_data
-def load_alarm_profile(path):
-    with open(path, "r") as f:
-        return json.load(f)
+st.markdown("<div class='main-title'>CNC Anomaly Detection Dashboard</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-text'>Playback & Live Monitoring Mode</div>", unsafe_allow_html=True)
 
-
-def call_cloud_api(api_url, cycle_name, batch_data, machine_state, model_profile_name):
-    payload = {
-        "cycle_name": cycle_name,
-        "machine_state": machine_state,
-        "model_version": model_profile_name,
-        "data": batch_data.tolist()
-    }
-    response = requests.post(f"{api_url}/predict", json=payload, timeout=120)
-    response.raise_for_status()
-    return response.json()
-
-
-def compute_status(mae, threshold, masked, violation_counter, debounce_n, recent_maes, subhealth_ratio):
-    if masked:
-        return "⚪ Masked", violation_counter, False, False
-
-    if mae > threshold:
-        violation_counter += 1
-    else:
-        violation_counter = 0
-
-    alarm = violation_counter >= debounce_n
-
-    if len(recent_maes) > 0:
-        exceed_ratio = float(np.mean(np.array(recent_maes) > threshold))
-    else:
-        exceed_ratio = 0.0
-
-    sub_health = exceed_ratio >= subhealth_ratio and not alarm
-
-    if alarm:
-        return "🔴 Anomaly Alarm", violation_counter, alarm, sub_health
-    if sub_health:
-        return "🟡 Sub-Health Warning", violation_counter, alarm, sub_health
-    return "🟢 Healthy", violation_counter, alarm, sub_health
-
-
-def reset_state():
-    st.session_state.records = []
-    st.session_state.violation_counter = 0
-    st.session_state.current_batch_idx = 0
-    st.session_state.running = False
-
-
-def get_status_css(status_text):
-    if "Healthy" in status_text:
-        return "healthy"
-    if "Warning" in status_text:
-        return "warning"
-    if "Masked" in status_text:
-        return "masked"
-    return "alarm"
-
-
-if "records" not in st.session_state:
-    st.session_state.records = []
-if "violation_counter" not in st.session_state:
-    st.session_state.violation_counter = 0
-if "current_batch_idx" not in st.session_state:
-    st.session_state.current_batch_idx = 0
-if "running" not in st.session_state:
-    st.session_state.running = False
-
-cycles = load_cycles()
-
-st.markdown("<div class='main-title'>Group 2 - Edge-Cloud CNC Anomaly Detection Dashboard</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-text'>Live dashboard.</div>", unsafe_allow_html=True)
-
+# --- 2. Sidebar: Controls ---
 with st.sidebar:
-    st.header("Controls")
+    st.header("🗂️ Data Source")
+    available_sources = fetch_available_sources()
+    selected_source = st.selectbox("Select Source File to Play", options=available_sources)
+    
+    # Detect when the user switches the data source, automatically reset the playback pointer and start playing
+    if selected_source != st.session_state.current_source:
+        st.session_state.current_source = selected_source
+        st.session_state.playback_index = 1
+        st.session_state.is_playing = True
+    
+    t3, t4 = get_sigma_bounds(selected_source)
+    st.markdown("### ⚠️ Alarm Logic Parameters")
 
-    api_url = st.text_input("Cloud API URL", value="http://127.0.0.1:5000")
+    slider_min = min(t3, t4)
+    slider_max = max(t3, t4)
+    if slider_min == slider_max:
+        slider_max = slider_min + 0.1
 
-    cycle_name = st.selectbox(
-        "Select cycle",
-        options=list(cycles.keys()),
-        index=0
+    custom_threshold = st.slider(
+        "Absolute MAE Threshold", 
+        min_value=float(slider_min), 
+        max_value=float(slider_max), 
+        value=float((slider_min + slider_max) / 2), 
+        step=0.001,
+        format="%.4f"
     )
 
-    machine_state = st.selectbox(
-        "Machine state",
-        options=["RUNNING", "STARTING", "STOPPING", "IDLE"],
-        index=0
-    )
+    debounce_n = st.number_input("Debounce limit", min_value=1, max_value=10, value=3)
 
-    profile_name = st.selectbox(
-        "Threshold profile",
-        options=list(ALARM_PROFILE_PATHS.keys()),
-        index=0
-    )
+    st.divider()
+    st.header("▶️ Playback Controls")
+    
+    col1, col2, col3 = st.columns(3)
+    if col1.button("▶️ Play"):
+        st.session_state.is_playing = True
+    if col2.button("⏸️ Pause"):
+        st.session_state.is_playing = False
+    if col3.button("🔄 Reset"):
+        st.session_state.playback_index = 1
+        st.session_state.is_playing = True
+        
+    playback_speed = st.slider("Playback Speed (Windows/tick)", 1, 10, 2)
+    refresh_rate = st.slider("Refresh Interval (sec)", 0.1, 1.0, 0.2, step=0.1)
+    display_limit = st.number_input("Display Window Size (Scrolling)", min_value=50, max_value=200, value=100, step=50)
 
-    profile = load_alarm_profile(ALARM_PROFILE_PATHS[profile_name])
-    mu = float(profile["mu"])
-    sigma = float(profile["sigma"])
 
-    st.markdown("### Threshold Settings")
-    k = st.slider("Threshold multiplier (k)", min_value=2.0, max_value=5.0, value=3.0, step=0.1)
-    threshold = mu + k * sigma
 
-    st.markdown("### Debounce Settings")
-    debounce_n = st.number_input("Debounce limit (N)", min_value=1, max_value=20, value=3, step=1)
+# --- 3. Fetch Full History ---
+df_full = fetch_full_history(selected_source)
 
-    st.markdown("### Sub-Health Settings")
-    subhealth_window = st.number_input("Sub-health window size", min_value=5, max_value=100, value=20, step=1)
-    subhealth_ratio = st.slider("Sub-health trigger ratio", min_value=0.05, max_value=1.0, value=0.20, step=0.05)
-
-    st.markdown("### Streaming Settings")
-    batch_size = st.number_input("Batch size", min_value=1, max_value=20, value=5, step=1)
-    delay_sec = st.slider("Delay between batches (sec)", min_value=0.0, max_value=2.0, value=0.2, step=0.1)
-
-    st.info(
-        f"Selected profile: **{profile.get('version', 'unknown')}**  \n"
-        f"μ = **{mu:.6f}**  \n"
-        f"σ = **{sigma:.6f}**  \n"
-        f"Threshold = **{threshold:.6f}**"
-    )
-
-col_a, col_b = st.columns([2, 1])
-
-with col_a:
-    st.subheader("Cycle Information")
-    selected_cycle = cycles[cycle_name]
-    st.write(f"Shape: `{selected_cycle.shape}`")
-    st.write(f"Cycle type: {'Bad' if 'bad' in cycle_name.lower() else 'Good'}")
-
-with col_b:
-    st.subheader("Session Actions")
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Reset"):
-        reset_state()
-        st.rerun()
-
-    if c2.button("Next Batch"):
-        st.session_state.running = False
-
-        n_windows = selected_cycle.shape[0]
-        start = st.session_state.current_batch_idx
-        end = min(start + batch_size, n_windows)
-
-        if start < n_windows:
-            batch = selected_cycle[start:end]
-            try:
-                result = call_cloud_api(api_url, cycle_name, batch, machine_state, profile_name)
-                mae = float(result["mean_mae"])
-                masked = machine_state in ["STARTING", "STOPPING"]
-
-                recent_maes = [r["mean_mae"] for r in st.session_state.records[-(subhealth_window - 1):]]
-                recent_maes.append(mae)
-
-                status, vc, alarm, sub_health = compute_status(
-                    mae=mae,
-                    threshold=threshold,
-                    masked=masked,
-                    violation_counter=st.session_state.violation_counter,
-                    debounce_n=debounce_n,
-                    recent_maes=recent_maes,
-                    subhealth_ratio=subhealth_ratio
-                )
-
-                st.session_state.violation_counter = vc
-                st.session_state.current_batch_idx = end
-
-                st.session_state.records.append({
-                    "batch_start": start,
-                    "batch_end": end,
-                    "mean_mae": mae,
-                    "threshold": threshold,
-                    "masked": masked,
-                    "status": status,
-                    "alarm": alarm,
-                    "sub_health": sub_health,
-                    "violation_counter": vc,
-                    "pct_above_3sigma": result.get("pct_windows_above_3sigma", 0.0),
-                    "pct_above_4sigma": result.get("pct_windows_above_4sigma", 0.0)
-                })
-
-                st.rerun()
-
-            except Exception as e:
-                st.error(f"API call failed: {e}")
-
-    if c3.button("Run Full Cycle"):
-        st.session_state.running = True
-
-progress_placeholder = st.empty()
-progress_text_placeholder = st.empty()
-status_placeholder = st.empty()
-metrics_placeholder = st.empty()
-chart_placeholder = st.empty()
-table_placeholder = st.empty()
-
-n_windows = selected_cycle.shape[0]
-
-if st.session_state.running:
-    while st.session_state.current_batch_idx < n_windows:
-        start = st.session_state.current_batch_idx
-        end = min(start + batch_size, n_windows)
-        batch = selected_cycle[start:end]
-
-        try:
-            result = call_cloud_api(api_url, cycle_name, batch, machine_state, profile_name)
-            mae = float(result["mean_mae"])
-            masked = machine_state in ["STARTING", "STOPPING"]
-
-            recent_maes = [r["mean_mae"] for r in st.session_state.records[-(subhealth_window - 1):]]
-            recent_maes.append(mae)
-
-            status, vc, alarm, sub_health = compute_status(
-                mae=mae,
-                threshold=threshold,
-                masked=masked,
-                violation_counter=st.session_state.violation_counter,
-                debounce_n=debounce_n,
-                recent_maes=recent_maes,
-                subhealth_ratio=subhealth_ratio
-            )
-
-            st.session_state.violation_counter = vc
-            st.session_state.current_batch_idx = end
-
-            st.session_state.records.append({
-                "batch_start": start,
-                "batch_end": end,
-                "mean_mae": mae,
-                "threshold": threshold,
-                "masked": masked,
-                "status": status,
-                "alarm": alarm,
-                "sub_health": sub_health,
-                "violation_counter": vc,
-                "pct_above_3sigma": result.get("pct_windows_above_3sigma", 0.0),
-                "pct_above_4sigma": result.get("pct_windows_above_4sigma", 0.0)
-            })
-
-            df = pd.DataFrame(st.session_state.records)
-            progress_placeholder.progress(min(end / n_windows, 1.0))
-            progress_text_placeholder.caption(f"Progress: {end}/{n_windows} windows processed")
-
-            latest = df.iloc[-1]
-            css_class = get_status_css(latest["status"])
-            status_placeholder.markdown(
-                f"<div class='status-card {css_class}'>Status: {latest['status']}</div>",
-                unsafe_allow_html=True
-            )
-
-            m1, m2, m3, m4 = metrics_placeholder.columns(4)
-            m1.metric("Latest MAE", f"{latest['mean_mae']:.6f}")
-            m2.metric("Threshold", f"{latest['threshold']:.6f}")
-            m3.metric("Violations", int(latest["violation_counter"]))
-            m4.metric("Current Status", latest["status"])
-
-            chart_df = df[["mean_mae", "threshold"]].copy()
-            chart_placeholder.line_chart(chart_df)
-
-            table_placeholder.dataframe(
-                df.tail(20),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            time.sleep(delay_sec)
-
-        except Exception as e:
-            st.error(f"Streaming stopped due to API error: {e}")
-            st.session_state.running = False
-            break
-
-    st.session_state.running = False
-
-if len(st.session_state.records) > 0:
-    df = pd.DataFrame(st.session_state.records)
-
-    progress_placeholder.progress(min(st.session_state.current_batch_idx / n_windows, 1.0))
-    progress_text_placeholder.caption(
-        f"Progress: {st.session_state.current_batch_idx}/{n_windows} windows processed"
-    )
-
-    latest = df.iloc[-1]
-    css_class = get_status_css(latest["status"])
-    status_placeholder.markdown(
-        f"<div class='status-card {css_class}'>Status: {latest['status']}</div>",
-        unsafe_allow_html=True
-    )
-
-    m1, m2, m3, m4 = metrics_placeholder.columns(4)
-    m1.metric("Latest MAE", f"{latest['mean_mae']:.6f}")
-    m2.metric("Threshold", f"{latest['threshold']:.6f}")
-    m3.metric("Violations", int(latest["violation_counter"]))
-    m4.metric("Current Status", latest["status"])
-
-    st.subheader("Live MAE vs Threshold")
-    chart_df = df[["mean_mae", "threshold"]].copy()
-    chart_placeholder.line_chart(chart_df)
-
-    st.subheader("Recent Inference Results")
-    table_placeholder.dataframe(
-        df.tail(25),
-        use_container_width=True,
-        hide_index=True
-    )
-
-    st.subheader("Summary")
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Total batches processed", len(df))
-    s2.metric("Max MAE", f"{df['mean_mae'].max():.6f}")
-    s3.metric("Alarm batches", int(df["alarm"].sum()))
-    s4.metric("Sub-health batches", int(df["sub_health"].sum()))
+if df_full.empty:
+    st.info("⏳ Waiting for data... Start `app.py` and `edge_simulator.py` to ingest data.")
 else:
-    st.info("No batches processed yet. Click 'Next Batch' or 'Run Full Cycle' to start.")
+    total_rows = len(df_full)
+    
+    # Make sure playback index does not exceed total rows, if it does, reset to total and pause
+    if st.session_state.playback_index > total_rows:
+        st.session_state.playback_index = total_rows
+        st.session_state.is_playing = False
+
+    # Slice the dataframe up to the current playback index to simulate streaming data
+    df_current_history = df_full.iloc[:st.session_state.playback_index]
+    
+    # UI on top of the page to show playback progress
+    st.progress(st.session_state.playback_index / total_rows, text=f"Playback Progress: {st.session_state.playback_index} / {total_rows} Windows")
+
+    # --- 4. Business Logic Calculation (Based on Current Progress) ---
+    if not df_current_history.empty:
+        # Calculate violation counter
+        recent_windows = df_current_history["window_error"].tolist()
+        violation_counter = 0
+        for error in reversed(recent_windows):
+            if error > custom_threshold:
+                violation_counter += 1
+            else:
+                break
+                
+        is_alarm = violation_counter >= debounce_n
+        is_warning = violation_counter > 0 and not is_alarm
+
+        if is_alarm:
+            status_text, css_class = "🔴 Critical Anomaly", "alarm"
+        elif is_warning:
+            status_text, css_class = "🟡 Warning (Debouncing)", "warning"
+        else:
+            status_text, css_class = "🟢 Healthy", "healthy"
+
+        # Render status card
+        st.markdown(f"<div class='status-card {css_class}'>{status_text}</div>", unsafe_allow_html=True)
+
+        # Render metrics
+        latest = df_current_history.iloc[-1]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Latest Window Error", f"{latest['window_error']:.4f}")
+        m2.metric("Custom Threshold", f"{custom_threshold:.2f}")
+        m3.metric("Consecutive Violations", f"{violation_counter} / {debounce_n}")
+        m4.metric("Current File", selected_source)
+
+        # --- 5. Render Chart (Implement Scrolling Window Effect) ---
+        st.subheader("📈 Streaming Window Error Chart")
+        
+        # Only take the latest display_limit records for plotting, creating a left-scrolling effect    
+        df_display = df_current_history.tail(display_limit).copy()
+        df_display["Threshold"] = custom_threshold
+        df_display["Time"] = pd.to_datetime(df_display["timestamp"], unit="s").dt.strftime('%H:%M:%S.%f').str[:-3]
+        df_display = df_display.set_index("Time")
+        st.line_chart(df_display[["window_error", "Threshold"]], color=["#3498db", "#e74c3c"])
+
+        # --- 6. Auto-playback Logic ---
+        if st.session_state.is_playing and st.session_state.playback_index < total_rows:
+            # Increment playback index by the selected speed, but do not exceed total rows
+            st.session_state.playback_index += playback_speed
+            time.sleep(refresh_rate)
+            st.rerun()
