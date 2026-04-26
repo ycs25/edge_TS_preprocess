@@ -3,6 +3,8 @@
 ## Overview
 This project implements an unsupervised deep learning system within a simulated IoT Edge-Cloud collaborative architecture to perform real-time anomaly detection on CNC machining cycles. By utilizing a hybrid Edge-Cloud framework, the system transitions manufacturing from schedule-based maintenance to predictive maintenance, instantly identifying defective machining cycles while handling the extreme variance of physical vibrations.
 
+Source of data: [CNC machining cycles](https://www.kaggle.com/datasets/maximilianfellhuber/cnc-machining-data)
+
 ## Core Architecture
 The system is distributed across three primary components to balance computational load and minimize transmission latency:
 * **Edge Device (IoT Simulation):** Simulates a high-frequency (2 kHz) data stream from CNC sensors. It handles lightweight preprocessing by slicing data into 500-step windows with a 250-step overlap. It applies a Symmetric Logarithm (`symlog`) and decentralized normalization (`RobustScaler`) using pre-calculated global parameters from an edge_params.json configuration file.
